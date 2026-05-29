@@ -1,12 +1,15 @@
 name: collect-lighter-data
 
-# Collects Lighter DEX historical data (1d + 15m OHLCV + hourly funding) for the
-# full perp universe and publishes it to a rolling `latest` GitHub Release.
+# Collects the FULL historical Lighter DEX dataset — every supported timeframe
+# (1m,5m,15m,30m,1h,4h,12h,1d,1w) OHLCV + hourly funding for all perps — and
+# publishes it to a rolling `latest` GitHub Release (one zip per timeframe).
 #
-# Throughput trick: Lighter rate-limits at 60 requests/min PER IP. GitHub matrix
-# jobs run on separate runners (separate IPs), so we shard the universe across
-# SHARDS parallel jobs — N× the single-IP ceiling — then a publish job merges
-# every shard's artifacts and (re)uploads the release assets.
+# Lighter rate-limits at 60 req/min PER IP. GitHub matrix jobs run on separate
+# runners (separate IPs), so each timeframe is sharded across N parallel jobs —
+# N× the single-IP ceiling. Fine timeframes (1m/5m/15m) get many shards to stay
+# under the 6h job cap; coarse ones (1d/1w) need just one. A `setup` job emits
+# the (tf, shard, shards) matrix; `publish` merges every shard and rebuilds the
+# release assets + notes (which carry the data timerange).
 
 on:
   schedule:
@@ -14,26 +17,44 @@ on:
   workflow_dispatch: {}        # manual trigger
 
 permissions:
-  contents: write              # required to create/update Releases
+  contents: write              # create/update Releases
 
 concurrency:
   group: collect-lighter-data
   cancel-in-progress: false
 
 env:
-  SHARDS: "8"                  # number of parallel shards (== length of the matrix list below)
   PY_VERSION: "3.13"
+  # Per-timeframe shard counts (fine TFs need more shards to fit the 6h job cap).
+  # Edit here to tune throughput; the matrix is generated from this map.
+  SHARD_MAP: '{"1w":1,"1d":1,"12h":1,"4h":1,"1h":2,"30m":3,"15m":8,"5m":8,"1m":20}'
 
 jobs:
-  ohlcv:
-    name: ohlcv ${{ matrix.tf }} shard ${{ matrix.shard }}
+  setup:
+    name: build matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 330       # under the 6h hard cap
+    outputs:
+      ohlcv: ${{ steps.gen.outputs.ohlcv }}
+    steps:
+      - id: gen
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          shards = json.loads(os.environ["SHARD_MAP"])
+          inc = [{"tf": tf, "shard": i, "shards": n} for tf, n in shards.items() for i in range(n)]
+          print("ohlcv=" + json.dumps({"include": inc}))
+          PY
+
+  ohlcv:
+    name: ohlcv ${{ matrix.tf }} ${{ matrix.shard }}/${{ matrix.shards }}
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 350       # under the 6h hard cap
     strategy:
       fail-fast: false
-      matrix:
-        tf: ["1d", "15m"]
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.setup.outputs.ohlcv) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,11 +62,11 @@ jobs:
           python-version: ${{ env.PY_VERSION }}
           cache: pip
       - run: pip install -r requirements.txt
-      - name: Collect ${{ matrix.tf }} (shard ${{ matrix.shard }}/${{ env.SHARDS }})
+      - name: Collect ${{ matrix.tf }} (shard ${{ matrix.shard }}/${{ matrix.shards }})
         run: |
           python collector/collect_ohlcv.py \
             --timeframe ${{ matrix.tf }} \
-            --shard ${{ matrix.shard }}/${{ env.SHARDS }} \
+            --shard ${{ matrix.shard }}/${{ matrix.shards }} \
             --out data/futures
       - uses: actions/upload-artifact@v4
         with:
@@ -55,9 +76,9 @@ jobs:
           if-no-files-found: warn
 
   funding:
-    name: funding shard ${{ matrix.shard }}
+    name: funding ${{ matrix.shard }}/8
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
@@ -69,11 +90,8 @@ jobs:
           python-version: ${{ env.PY_VERSION }}
           cache: pip
       - run: pip install -r requirements.txt
-      - name: Collect funding (shard ${{ matrix.shard }}/${{ env.SHARDS }})
-        run: |
-          python collector/collect_funding.py \
-            --shard ${{ matrix.shard }}/${{ env.SHARDS }} \
-            --out data/funding
+      - name: Collect funding (shard ${{ matrix.shard }}/8)
+        run: python collector/collect_funding.py --shard ${{ matrix.shard }}/8 --out data/funding
       - uses: actions/upload-artifact@v4
         with:
           name: funding-${{ matrix.shard }}
@@ -107,14 +125,25 @@ jobs:
           path: _staging/funding
           merge-multiple: true
 
-      - name: Package release assets
+      - name: Package per-timeframe zips + manifest + notes
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          cd _staging/futures && (ls *-1d-futures.feather  >/dev/null 2>&1 && zip -q -j ../../dist/lighter-1d.zip  *-1d-futures.feather  || echo "no 1d feathers"); cd - >/dev/null
-          cd _staging/futures && (ls *-15m-futures.feather >/dev/null 2>&1 && zip -q -j ../../dist/lighter-15m.zip *-15m-futures.feather || echo "no 15m feathers"); cd - >/dev/null
-          cd _staging/funding && (ls *.parquet            >/dev/null 2>&1 && zip -q -j ../../dist/lighter-funding.zip *.parquet         || echo "no funding parquet"); cd - >/dev/null
-          python collector/make_manifest.py --futures _staging/futures --funding _staging/funding --out dist/manifest.json
+          # one zip per timeframe actually present
+          for tf in 1m 5m 15m 30m 1h 4h 12h 1d 1w; do
+            if ls _staging/futures/*-${tf}-futures.feather >/dev/null 2>&1; then
+              (cd _staging/futures && zip -q -j "../../dist/lighter-${tf}.zip" *-${tf}-futures.feather)
+              echo "packed lighter-${tf}.zip"
+            fi
+          done
+          if ls _staging/funding/*.parquet >/dev/null 2>&1; then
+            (cd _staging/funding && zip -q -j ../../dist/lighter-funding.zip *.parquet)
+            echo "packed lighter-funding.zip"
+          fi
+          python collector/make_manifest.py \
+            --futures _staging/futures --funding _staging/funding \
+            --out dist/manifest.json --notes dist/release_notes.md
           ls -lh dist/
 
       - name: Publish to rolling 'latest' release
@@ -122,8 +151,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          NOTES="Rolling Lighter historical dataset — regenerated ${{ github.run_id }} on $(date -u +%Y-%m-%dT%H:%MZ). See manifest.json for coverage."
           gh release view latest >/dev/null 2>&1 \
-            || gh release create latest --title "Lighter historical data (latest)" --notes "$NOTES" --latest
-          gh release edit latest --notes "$NOTES" --latest
+            || gh release create latest --title "Lighter historical data (latest)" --notes-file dist/release_notes.md --latest
+          gh release edit latest --title "Lighter historical data (latest)" --notes-file dist/release_notes.md --latest
           gh release upload latest dist/*.zip dist/manifest.json --clobber

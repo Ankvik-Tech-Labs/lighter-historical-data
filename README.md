@@ -4,14 +4,20 @@ Automated collector for **Lighter DEX** ([`mainnet.zklighter.elliot.ai`](https:/
 
 ## What's collected
 
-| Asset | Contents | Format |
-|---|---|---|
-| `lighter-1d.zip` | Daily OHLCV, all Lighter perps | Freqtrade feather: `{TOKEN}_USDC_USDC-1d-futures.feather` (`date,open,high,low,close,volume`) |
-| `lighter-15m.zip` | 15-minute OHLCV, all perps | `{TOKEN}_USDC_USDC-15m-futures.feather` |
-| `lighter-funding.zip` | Hourly funding rates, all perps | parquet `lighter_funding_rate_lighter_{TOKEN}_1h_{start}_{end}.parquet` — `DatetimeIndex 'time'` + `funding_rate` (signed), `value`, `direction` |
-| `manifest.json` | File counts + date coverage per asset | JSON |
+**Full history** (Lighter genesis → now, no truncation) for **all perp markets**, at **every Lighter timeframe**, plus hourly funding. One release asset per timeframe:
 
-Lighter perps begin **2025-01-17** (~16 months of history); markets list progressively.
+| Asset | Contents |
+|---|---|
+| `lighter-1m.zip` `lighter-5m.zip` `lighter-15m.zip` `lighter-30m.zip` | intraday OHLCV |
+| `lighter-1h.zip` `lighter-4h.zip` `lighter-12h.zip` `lighter-1d.zip` `lighter-1w.zip` | hourly→weekly OHLCV |
+| `lighter-funding.zip` | hourly funding rates |
+| `manifest.json` | file counts + **exact date coverage** per asset |
+
+- OHLCV format: Freqtrade feather `{TOKEN}_USDC_USDC-{tf}-futures.feather` (`date,open,high,low,close,volume`).
+- Funding format: parquet `lighter_funding_rate_lighter_{TOKEN}_1h_{start}_{end}.parquet` — `DatetimeIndex 'time'` + `funding_rate` (signed), `value`, `direction`.
+- The **release notes show the data timerange** of every asset; `manifest.json` has exact ISO timestamps.
+
+Lighter perps begin **2025-01-17**; markets list progressively, so newer tokens have shorter histories.
 
 ## Consume the data
 
