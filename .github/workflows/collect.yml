@@ -13,7 +13,7 @@ name: collect-lighter-data
 
 on:
   schedule:
-    - cron: "0 6 * * *"        # daily 06:00 UTC
+    - cron: "0 6 * * 0"        # weekly, Sunday 06:00 UTC (incremental — cheap)
   workflow_dispatch: {}        # manual trigger
 
 permissions:
@@ -62,12 +62,24 @@ jobs:
           python-version: ${{ env.PY_VERSION }}
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Seed prior ${{ matrix.tf }} from latest release (incremental delta)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prior/futures
+          if gh release download latest -R "${{ github.repository }}" --pattern "lighter-${{ matrix.tf }}.zip" --dir prior 2>/dev/null; then
+            unzip -q -o "prior/lighter-${{ matrix.tf }}.zip" -d prior/futures
+            echo "seeded $(ls prior/futures | wc -l) prior ${{ matrix.tf }} feathers — fetching delta only"
+          else
+            echo "no prior ${{ matrix.tf }} release asset — full backfill"
+          fi
       - name: Collect ${{ matrix.tf }} (shard ${{ matrix.shard }}/${{ matrix.shards }})
         run: |
           python collector/collect_ohlcv.py \
             --timeframe ${{ matrix.tf }} \
             --shard ${{ matrix.shard }}/${{ matrix.shards }} \
-            --out data/futures
+            --out data/futures \
+            --prior-dir prior/futures
       - uses: actions/upload-artifact@v4
         with:
           name: ohlcv-${{ matrix.tf }}-${{ matrix.shard }}

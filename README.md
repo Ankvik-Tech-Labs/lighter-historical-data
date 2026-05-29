@@ -1,6 +1,6 @@
 # lighter-historical-data
 
-Automated collector for **Lighter DEX** ([`mainnet.zklighter.elliot.ai`](https://apidocs.lighter.xyz)) historical market data, published as a rolling GitHub **Release**. A GitHub Actions workflow refreshes the full perp universe daily and (re)uploads the dataset so anyone can pull it from one stable URL — no API calls, no rate limits, no auth.
+Automated collector for **Lighter DEX** ([`mainnet.zklighter.elliot.ai`](https://apidocs.lighter.xyz)) historical market data, published as a rolling GitHub **Release**. A GitHub Actions workflow refreshes the full perp universe **weekly** (and on demand) and (re)uploads the dataset so anyone can pull it from one stable URL — no API calls, no rate limits, no auth. Runs are **incremental**: each refresh seeds from the prior release and fetches only new candles, so a weekly update costs the delta — the first run does the full backfill.
 
 ## What's collected
 
@@ -41,7 +41,10 @@ df = pd.read_feather("data/futures/BTC_USDC_USDC-1d-futures.feather")  # date,op
 Lighter rate-limits at **60 requests/min per IP**. GitHub Actions matrix jobs run on **separate runners (separate IPs)**, so the workflow shards the universe across `SHARDS` (default 8) parallel jobs per timeframe — roughly `SHARDS ×` the single-IP ceiling — then a `publish` job merges every shard's artifacts and updates the `latest` release.
 
 ```
-.github/workflows/collect.yml   schedule (daily 06:00 UTC) + manual dispatch
+.github/workflows/collect.yml   schedule (weekly Sun 06:00 UTC) + manual dispatch
+  setup    → emits per-timeframe shard matrix (fine TFs many shards, coarse 1)
+  ohlcv    → seed prior release asset → fetch delta only → artifact per shard
+  funding  → full refresh (cheap) → artifact per shard
   ├─ ohlcv   (matrix: tf ∈ {1d,15m} × shard ∈ 0..7)  → artifact per shard
   ├─ funding (matrix: shard ∈ 0..7)                  → artifact per shard
   └─ publish (needs all) → merge → zip + manifest → gh release upload latest --clobber

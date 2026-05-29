@@ -199,8 +199,8 @@ def apply_shard(symbols: list[str], shard: str) -> list[str]:
     return subset
 
 
-def fetch_pair(symbol: str, timeframe: str, limiter: RateLimiter) -> pd.DataFrame:
-    """Fetch the full available candle history for one symbol.
+def fetch_pair(symbol: str, timeframe: str, limiter: RateLimiter, since_ms: int | None = None) -> pd.DataFrame:
+    """Fetch candle history for one symbol from ``since_ms`` (default: genesis).
 
     Pages deterministically with explicit ``(since, until)`` windows (the Lighter
     endpoint anchors on ``count_back`` rather than honouring ``since``). Each HTTP
@@ -210,6 +210,8 @@ def fetch_pair(symbol: str, timeframe: str, limiter: RateLimiter) -> pd.DataFram
     :param symbol: CCXT unified symbol, e.g. ``BTC/USDC:USDC``.
     :param timeframe: One of the keys in :data:`TIMEFRAME_MS`.
     :param limiter: Shared rate limiter gating every request.
+    :param since_ms: Start timestamp (ms). ``None`` → :data:`EARLIEST_MS` (full
+        history). For incremental refresh, pass the bar after the last cached one.
     :returns: A Freqtrade-shaped frame (``date,open,high,low,close,volume``),
         UTC-dated, sorted ascending, de-duplicated. Empty if no data.
     """
@@ -219,7 +221,7 @@ def fetch_pair(symbol: str, timeframe: str, limiter: RateLimiter) -> pd.DataFram
     now_ms = exchange.milliseconds()
     rows: dict[int, list[float]] = {}
 
-    cursor = EARLIEST_MS
+    cursor = EARLIEST_MS if since_ms is None else since_ms
     while cursor < now_ms:
         window_end = min(cursor + window_ms, now_ms)
         batch: list = []
@@ -261,16 +263,43 @@ def feather_name(symbol: str, timeframe: str) -> str:
     return f"{token}-{timeframe}-futures.feather"
 
 
-def collect_pair(symbol: str, timeframe: str, out_dir: Path, limiter: RateLimiter) -> PairResult:
-    """Worker: fetch one symbol, write its feather, return a summary record.
+def collect_pair(symbol: str, timeframe: str, out_dir: Path, limiter: RateLimiter, prior_dir: Path | None = None) -> PairResult:
+    """Worker: fetch one symbol, merge with prior data if any, write its feather.
+
+    Incremental: if ``prior_dir`` holds a previous feather for this pair, only the
+    candles after its last bar are fetched, then concatenated and de-duplicated —
+    so a refresh costs the delta, not a full re-backfill. Without ``prior_dir``
+    (or on first run) it fetches the full history.
 
     :param symbol: CCXT unified symbol.
     :param timeframe: Candle timeframe.
-    :param out_dir: Directory the feather is written into.
+    :param out_dir: Directory the merged feather is written into.
     :param limiter: Shared rate limiter.
+    :param prior_dir: Optional dir of previous-run feathers to seed from.
     :returns: A :class:`PairResult` describing the outcome.
     """
-    df = fetch_pair(symbol, timeframe, limiter)
+    prior_df: pd.DataFrame | None = None
+    since_ms: int | None = None
+    if prior_dir is not None:
+        prior_path = prior_dir / feather_name(symbol, timeframe)
+        if prior_path.exists():
+            try:
+                prior_df = pd.read_feather(prior_path)
+                if len(prior_df):
+                    last = pd.to_datetime(prior_df["date"].iloc[-1], utc=True)
+                    since_ms = int(last.value // 1_000_000) + TIMEFRAME_MS[timeframe]
+            except (OSError, ValueError):
+                prior_df = None
+
+    new_df = fetch_pair(symbol, timeframe, limiter, since_ms=since_ms)
+
+    if prior_df is not None and len(prior_df):
+        df = pd.concat([prior_df, new_df], ignore_index=True)
+        df["date"] = pd.to_datetime(df["date"], utc=True)
+        df = df.drop_duplicates(subset="date", keep="last").sort_values("date").reset_index(drop=True)
+    else:
+        df = new_df
+
     if df.empty:
         return PairResult(pair=symbol, rows=0, start=None, end=None)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -291,6 +320,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rate", type=int, default=55, help="Max requests per minute; Lighter IP cap is 60 (default: 55).")
     parser.add_argument("--shard", default=None, help="Collect only shard I of N from the sorted perp universe, e.g. '0/8'. Strided split symbols[I::N].")
     parser.add_argument("--symbols", nargs="*", default=None, help="Explicit CCXT symbols; overrides universe and --shard.")
+    parser.add_argument("--prior-dir", type=Path, default=None, help="Dir of previous-run feathers; enables incremental delta fetch.")
     return parser.parse_args(argv)
 
 
@@ -341,7 +371,7 @@ def main(argv: list[str] | None = None) -> None:
     with Progress(*columns) as progress:
         task = progress.add_task(f"Lighter {args.timeframe}", total=len(symbols), last="")
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            futures = {pool.submit(collect_pair, sym, args.timeframe, out_dir, limiter): sym for sym in symbols}
+            futures = {pool.submit(collect_pair, sym, args.timeframe, out_dir, limiter, args.prior_dir): sym for sym in symbols}
             for fut in as_completed(futures):
                 sym = futures[fut]
                 try:
