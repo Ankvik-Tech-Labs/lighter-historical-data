@@ -71,6 +71,12 @@ EARLIEST_MS: int = ccxt.lighter().parse8601("2024-12-01T00:00:00Z")
 #: Maximum candles Lighter returns per ``fetch_ohlcv`` call.
 PAGE_LIMIT: int = 500
 
+#: Per-window fetch attempts before giving up (guards against transient 429/5xx/timeout
+#: leaving data gaps); exponential backoff between attempts.
+MAX_RETRIES: int = 4
+#: Base backoff in seconds (attempt n waits ``RETRY_BACKOFF_S * 2**n``).
+RETRY_BACKOFF_S: float = 1.0
+
 #: Thread-local store for per-thread CCXT instances (ccxt is not thread-safe to share).
 _TLS = threading.local()
 
@@ -213,12 +219,19 @@ def fetch_pair(symbol: str, timeframe: str, limiter: RateLimiter) -> pd.DataFram
     cursor = EARLIEST_MS
     while cursor < now_ms:
         window_end = min(cursor + window_ms, now_ms)
-        limiter.acquire()
-        try:
-            batch = exchange.fetch_ohlcv(symbol, timeframe, since=cursor, limit=PAGE_LIMIT, params={"until": window_end})
-        except ccxt.BaseError as exc:
-            logger.warning("%s: fetch error at window %d-%d: %s", symbol, cursor, window_end, exc)
-            batch = []
+        batch: list = []
+        for attempt in range(MAX_RETRIES):
+            limiter.acquire()
+            try:
+                batch = exchange.fetch_ohlcv(symbol, timeframe, since=cursor, limit=PAGE_LIMIT, params={"until": window_end})
+                break
+            except ccxt.BaseError as exc:
+                if attempt == MAX_RETRIES - 1:
+                    # Exhausted retries — log and skip this window (leaves a gap; rare).
+                    logger.warning("%s: window %d-%d failed after %d tries: %s", symbol, cursor, window_end, MAX_RETRIES, exc)
+                else:
+                    # Transient (429 / 5xx / timeout) — exponential backoff, then retry.
+                    time.sleep(RETRY_BACKOFF_S * (2 ** attempt))
         for r in batch:
             rows[int(r[0])] = r
         cursor = window_end + tf_ms
