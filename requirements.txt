@@ -1,0 +1,5 @@
+ccxt>=4.5.48
+pandas>=2.0
+pyarrow>=15.0
+rich>=13.0
+requests>=2.31

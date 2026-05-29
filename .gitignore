@@ -1,0 +1,11 @@
+# collected data is published to GitHub Releases, never committed
+data/
+_staging/
+dist/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.python-version
