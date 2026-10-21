@@ -12,9 +12,8 @@ name: collect-lighter-data
 # release assets + notes (which carry the data timerange).
 
 on:
-  schedule:
-    - cron: "0 6 * * 0"        # weekly, Sunday 06:00 UTC (incremental — cheap)
-  workflow_dispatch: {}        # manual trigger
+  # Vitalik8 owns scheduled collection; use this only for manual recovery.
+  workflow_dispatch: {}
 
 permissions:
   contents: write              # create/update Releases

@@ -1,6 +1,6 @@
 # lighter-historical-data
 
-Automated collector for **Lighter DEX** ([`mainnet.zklighter.elliot.ai`](https://apidocs.lighter.xyz)) historical market data, published as a rolling GitHub **Release**. A GitHub Actions workflow refreshes the full perp universe **weekly** (and on demand) and (re)uploads the dataset so anyone can pull it from one stable URL — no API calls, no rate limits, no auth. Runs are **incremental**: each refresh seeds from the prior release and fetches only new candles, so a weekly update costs the delta — the first run does the full backfill.
+Historical data for **Lighter DEX** ([`mainnet.zklighter.elliot.ai`](https://apidocs.lighter.xyz)). The canonical archive is on Vitalik8 at `/srv/lighter/ohlcv` and `/srv/lighter/funding`; this repository's Releases are recovery snapshots. The 2026-10-21 audit found 223 symbol files per 1m–1d resolution while the API listed 240 perpetual markets. The current weekly archive is stale. A Nautilus change to backfill missing markets from their available history and rebuild weekly candles from daily bars is staged but not deployed.
 
 ## What's collected
 
@@ -19,10 +19,26 @@ Automated collector for **Lighter DEX** ([`mainnet.zklighter.elliot.ai`](https:/
 
 Lighter perps begin **2025-01-17**; markets list progressively, so newer tokens have shorter histories.
 
-## Consume the data
+## Consume the canonical archive
+
+From a checkout of `nautilus-strategies`, sync the shared archive with:
 
 ```bash
-# whole dataset, latest snapshot
+bash scripts/download_lighter_data.sh
+```
+
+The script uses `rsync` over the `vitalik8` SSH alias and writes to
+`data/lighter/futures/` and `data/lighter/funding/`.
+
+## Recovery release
+
+The last full release snapshot was generated on 2026-08-02. GitHub has disabled
+the workflow for inactivity; the workflow file is being changed to remove its
+schedule while keeping `workflow_dispatch` as a recovery option if re-enabled.
+Use the release snapshot only to recover the archive if Vitalik8 is unavailable.
+
+```bash
+# whole recovery snapshot
 gh release download latest -R Ankvik-Tech-Labs/lighter-historical-data
 
 # or a single asset by stable URL
@@ -36,12 +52,14 @@ import pandas as pd
 df = pd.read_feather("data/futures/BTC_USDC_USDC-1d-futures.feather")  # date,open,high,low,close,volume
 ```
 
-## How it works
+## Manual recovery workflow
 
-Lighter rate-limits at **60 requests/min per IP**. GitHub Actions matrix jobs run on **separate runners (separate IPs)**, so the workflow shards the universe across `SHARDS` (default 8) parallel jobs per timeframe — roughly `SHARDS ×` the single-IP ceiling — then a `publish` job merges every shard's artifacts and updates the `latest` release.
+The manual Actions workflow can rebuild the release snapshot. Lighter rate-limits
+at **60 requests/min per IP**; matrix jobs use separate runners and shard the
+universe to fit the historical backfill within the Actions job cap.
 
 ```
-.github/workflows/collect.yml   schedule (weekly Sun 06:00 UTC) + manual dispatch
+.github/workflows/collect.yml   manual dispatch only (Vitalik8 owns the schedule)
   setup    → emits per-timeframe shard matrix (fine TFs many shards, coarse 1)
   ohlcv    → seed prior release asset → fetch delta only → artifact per shard
   funding  → full refresh (cheap) → artifact per shard
